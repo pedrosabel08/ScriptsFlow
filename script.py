@@ -286,11 +286,12 @@ def process_job_folder(cursor, job_folder):
 
             # Upload da prévia
             local_path = os.path.join(caminho_pasta, previa_val)
-            remote_path = f"previas/{previa_val}"
+            remote_path = remote_base_path + previa_val  # sempre dentro de /www/sistema/uploads/renders/
             ftp_host = os.getenv("FTP_HOST")
             ftp_user = os.getenv("FTP_USER")
             ftp_pass = os.getenv("FTP_PASS")
-            upload_to_ftp(local_path, remote_path, ftp_host, ftp_user, ftp_pass)
+            upload_ok = upload_to_ftp(local_path, remote_path, ftp_host, ftp_user, ftp_pass)
+
 
     cursor.execute("""
         INSERT INTO render_alta

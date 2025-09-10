@@ -1,41 +1,18 @@
-import os
-from ftplib import FTP
-from dotenv import load_dotenv
+import re
 
-# Função de log simples
-def log_and_print(msg, level="info"):
-    print(msg)
+def get_prefix(name: str) -> str:
+    if not name:
+        return ""
+    
+    # Captura número + ponto + duas partes com underscore
+    match = re.match(r'^(\d+\.[A-Za-z0-9]+_[A-Za-z0-9]+)', name)
+    if match:
+        return match.group(1)
+    return name
 
-# Carrega variáveis do .env
-load_dotenv()
 
-FTP_HOST = os.getenv("FTP_HOST")
-FTP_USER = os.getenv("FTP_USER")
-FTP_PASS = os.getenv("FTP_PASS")
 
-# Arquivo de teste (pode ser qualquer arquivo pequeno, ex: teste.txt)
-local_test_file = r"C:\Backburner_Job\processamento.log"  # certifique-se que existe
-remote_test_path = "/www/sistema/uploads/renders/processamento.log"
-
-def test_ftp_upload(local_path, remote_path, ftp_host, ftp_user, ftp_pass):
-    try:
-        ftp = FTP(ftp_host, timeout=30)
-        ftp.login(ftp_user, ftp_pass)
-        log_and_print(f"🌐 Conectado ao FTP: {ftp_host}")
-
-        with open(local_path, "rb") as file:
-            ftp.storbinary(f"STOR {remote_path}", file)
-
-        ftp.quit()
-        log_and_print(f"✅ Upload de teste concluído: {remote_path}")
-        return True
-    except Exception as e:
-        log_and_print(f"❌ Erro no upload de teste FTP: {e}")
-        return False
-
-# Executa o teste
-if __name__ == "__main__":
-    if os.path.exists(local_test_file):
-        test_ftp_upload(local_test_file, remote_test_path, FTP_HOST, FTP_USER, FTP_PASS)
-    else:
-        log_and_print(f"⚠ Arquivo de teste não encontrado: {local_test_file}")
+print(get_prefix("26.LD9_URB Suite do apartamento Loft 4301 A_EF"))  # 26.LD9_URB
+print(get_prefix("22.LD9_URB_Living_Dup_4301B_015"))                 # 22.LD9_URB_Living_Dup_4301B_015 -> mas podemos limitar até o segundo underscore
+print(get_prefix("25.LD9_URB_Living Apto 4301 A_EF"))                 # 25.LD9_URB_Living
+print(get_prefix("24.LD9_URB Living Apto Tipo unidade 4402A_EF"))    # 24.LD9_URB

@@ -47,11 +47,10 @@ def get_prefix(name: str) -> str:
     if not name:
         return ""
     
-    # Captura número(s) + ponto + espaço opcional + letras + underline + letras
-    match = re.match(r'^(\d+\.\s*[A-Za-z]+_[A-Za-z]+)', name)
+    # Captura número + ponto + duas partes com underscore
+    match = re.match(r'^(\d+\.[A-Za-z0-9]+_[A-Za-z0-9]+)', name)
     if match:
-        # Remove espaço depois do ponto, se houver
-        return match.group(1).replace(" ", "")
+        return match.group(1)
     return name
 
 
@@ -140,7 +139,7 @@ def find_imagem_id(cursor, name):
 def find_responsavel_id(cursor, imagem_id):
     log_and_print(f"Buscando imagem no banco: {imagem_id}")
     cursor.execute(
-        "SELECT colaborador_id FROM funcao_imagem WHERE funcao_id = 4 AND imagem_id = %s",
+        "SELECT colaborador_id FROM funcao_imagem WHERE funcao_id in (4, 6) AND imagem_id = %s ORDER BY colaborador_id DESC LIMIT 1",
         (imagem_id,)
     )
     result = cursor.fetchone()
@@ -482,7 +481,12 @@ def main():
         for root, dirs, files in os.walk(PARENT_FOLDER):
             for d in dirs:
                 job_folder = os.path.join(root, d)
-                process_job_folder(cursor, job_folder)
+                try:
+                    process_job_folder(cursor, job_folder)
+                except Exception as e:
+                    log_and_print(f"❌ Erro ao processar a pasta {job_folder}: {e}", "error")
+                    # continua para a próxima pasta sem parar tudo
+                    continue  
         conn.commit()
     log_and_print("Processamento concluído!")
 

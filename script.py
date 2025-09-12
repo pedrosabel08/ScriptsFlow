@@ -139,7 +139,7 @@ def find_imagem_id(cursor, name):
 def find_responsavel_id(cursor, imagem_id):
     log_and_print(f"Buscando imagem no banco: {imagem_id}")
     cursor.execute(
-        "SELECT colaborador_id FROM funcao_imagem WHERE funcao_id in (4, 6) AND imagem_id = %s ORDER BY colaborador_id DESC LIMIT 1",
+        "SELECT colaborador_id FROM funcao_imagem WHERE funcao_id in (4, 6) AND imagem_id = %s ORDER BY funcao_id DESC LIMIT 1",
         (imagem_id,)
     )
     result = cursor.fetchone()

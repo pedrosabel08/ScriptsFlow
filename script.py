@@ -10,7 +10,8 @@ import re
 from dotenv import load_dotenv
 
 # Carrega as variáveis do arquivo .env
-load_dotenv()
+load_dotenv(r"C:\xampp\htdocs\ScriptsFlow\.env")
+
 
 PARENT_FOLDER = r"C:\Backburner_Job"
 EXCLUDE_KEYWORD = "ANIMA"
@@ -43,14 +44,27 @@ conn = pymysql.connect(
     charset='utf8mb4'
 )
 
+
+log_and_print(f"Usuário: {os.getlogin()}")
+log_and_print(f"Diretório atual: {os.getcwd()}")
+log_and_print(f".env carregado: {os.getenv('DB_HOST')}")
+
+
 def get_prefix(name: str) -> str:
     if not name:
         return ""
     
-    # Captura número + ponto + duas partes com underscore
-    match = re.match(r'^(\d+\.[A-Za-z0-9]+_[A-Za-z0-9]+)', name)
-    if match:
-        return match.group(1)
+    # Caso padrão: número + ponto + partes com underscore
+    m1 = re.match(r'^(\d+\.\s*[A-Za-z0-9]+_[A-Za-z0-9]+)', name)
+    if m1:
+        return m1.group(1).replace(" ", "")
+    
+    # Caso número + underscore no início (ex.: 7_CEG_RES ...)
+    m2 = re.match(r'^(\d+)_([A-Za-z0-9_]+)', name)
+    if m2:
+        return f"{m2.group(1)}.{m2.group(2)}"  # substitui apenas o primeiro underscore
+    
+    # Caso nenhum padrão conhecido
     return name
 
 
@@ -199,7 +213,12 @@ def process_job_folder(cursor, job_folder):
         log_and_print(f"Imagem não encontrada para {image_name_xml}")
         return
 
-    caminho_pasta = os.path.dirname(xml_data.get("ExrPath")) if xml_data.get("ExrPath") else None
+    exr_path = xml_data.get("ExrPath")
+    if exr_path:
+        # Substitui Y: pelo UNC
+        caminho_pasta = os.path.dirname(exr_path.replace(r"Y:", r"\\192.168.0.250\renders"))
+    else:
+        caminho_pasta = None
 
     # Buscar informações complementares
     cursor.execute("SELECT imagem_nome FROM imagens_cliente_obra WHERE idimagens_cliente_obra = %s", (imagem_id,))
@@ -275,6 +294,9 @@ def process_job_folder(cursor, job_folder):
     if ultimo_status == "Erro" and complete == "yes":
         status_custom = "Em aprovação"
         log_and_print("🔄 Status alterado de 'Erro' para 'Em aprovação' pois Complete=Yes")
+
+
+    log_and_print(f"Procurando JPGs em: {caminho_pasta}")
 
     # 4️⃣ Fluxo normal para Em andamento ou novo registro
     previa_val = None

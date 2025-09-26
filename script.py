@@ -59,11 +59,6 @@ def get_prefix(name: str) -> str:
     if m1:
         return m1.group(1).replace(" ", "")
     
-    # Caso número + underscore no início (ex.: 7_CEG_RES ...)
-    m2 = re.match(r'^(\d+)_([A-Za-z0-9_]+)', name)
-    if m2:
-        return f"{m2.group(1)}.{m2.group(2)}"  # substitui apenas o primeiro underscore
-    
     # Caso nenhum padrão conhecido
     return name
 
@@ -153,15 +148,15 @@ def find_imagem_id(cursor, name):
 def find_responsavel_id(cursor, imagem_id):
     log_and_print(f"Buscando imagem no banco: {imagem_id}")
     cursor.execute(
-        "SELECT colaborador_id FROM funcao_imagem WHERE funcao_id in (4, 6) AND imagem_id = %s ORDER BY funcao_id DESC LIMIT 1",
+        "SELECT colaborador_id, funcao_id FROM funcao_imagem WHERE funcao_id in (4, 6) AND imagem_id = %s ORDER BY funcao_id DESC LIMIT 1",
         (imagem_id,)
     )
     result = cursor.fetchone()
     if result:
-        log_and_print(f"Colaborador encontrado: {result[0]}")
-        return result[0]
+        log_and_print(f"Colaborador encontrado: {result[0]} (função {result[1]})")
+        return result  # retorna (colaborador_id, funcao_id)
     log_and_print("Imagem não encontrada", "warning")
-    return None
+    return None, None
 
 def find_status_id(cursor, imagem_id):
     log_and_print(f"Buscando status atual no banco: {imagem_id}")
@@ -225,7 +220,7 @@ def process_job_folder(cursor, job_folder):
     row = cursor.fetchone()
     image_name_db = row[0] if row else None
 
-    resp_id = find_responsavel_id(cursor, imagem_id)
+    resp_id, funcao_id = find_responsavel_id(cursor, imagem_id)
     status_id = find_status_id(cursor, imagem_id)
 
     # Buscar status existente
@@ -366,30 +361,31 @@ def process_job_folder(cursor, job_folder):
     responsavel_pos_id = pos_row[0] if pos_row else None
 
     # 🔹 Inserir ou atualizar na tabela pós-produção
-    cursor.execute("""
-        INSERT INTO pos_producao
-        (render_id, imagem_id, obra_id, colaborador_id, caminho_pasta, numero_bg, status_id, responsavel_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            obra_id = VALUES(obra_id),
-            colaborador_id = VALUES(colaborador_id),
-            caminho_pasta = VALUES(caminho_pasta),
-            numero_bg = VALUES(numero_bg),
-            status_id = VALUES(status_id),
-            responsavel_id = VALUES(responsavel_id)
-    """, (
-        render_id,
-        imagem_id,
-        obra_id,
-        resp_id,
-        caminho_pasta,
-        xml_data.get("Description"),
-        status_id,
-        responsavel_pos_id
-    ))
-
-    log_and_print(f"📌 Pós-produção vinculada: render_id={render_id}, imagem_id={imagem_id}, obra_id={obra_id}")
-    
+    if responsavel_pos_id:  # só se houver alguém com função 5
+        cursor.execute("""
+            INSERT INTO pos_producao
+            (render_id, imagem_id, obra_id, colaborador_id, caminho_pasta, numero_bg, status_id, responsavel_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                obra_id = VALUES(obra_id),
+                colaborador_id = VALUES(colaborador_id),
+                caminho_pasta = VALUES(caminho_pasta),
+                numero_bg = VALUES(numero_bg),
+                status_id = VALUES(status_id),
+                responsavel_id = VALUES(responsavel_id)
+        """, (
+            render_id,
+            imagem_id,
+            obra_id,
+            resp_id,
+            caminho_pasta,
+            xml_data.get("Description"),
+            status_id,
+            responsavel_pos_id
+        ))
+        log_and_print(f"📌 Pós-produção vinculada: render_id={render_id}, imagem_id={imagem_id}, obra_id={obra_id}")
+    else:
+        log_and_print(f"⚠ Imagem {imagem_id} não possui pós-produção, pulando inserção na pos_producao")
     
     # AGORA LENDO TUDO DO .ENV
     slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
@@ -481,12 +477,12 @@ def process_job_folder(cursor, job_folder):
             log_and_print(f"🔔 Notificação enviada para colaborador {resp_id} e canal de renders.")
 
         # Atualizar função e imagem
-    if status_custom == "Em aprovação":
+    if status_custom == "Em aprovação" and funcao_id:
         cursor.execute("""
             UPDATE funcao_imagem
             SET status = 'Finalizado', prazo = NOW()
-            WHERE imagem_id = %s AND funcao_id = 4
-        """, (imagem_id,))
+            WHERE imagem_id = %s AND funcao_id = %s
+        """, (imagem_id, funcao_id))
         log_and_print(f"Função atualizada para Finalizado para imagem_id {imagem_id}")
 
         cursor.execute("""

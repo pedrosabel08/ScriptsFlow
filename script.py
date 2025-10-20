@@ -210,8 +210,16 @@ def process_job_folder(cursor, job_folder):
 
     exr_path = xml_data.get("ExrPath")
     if exr_path:
-        # Substitui Y: pelo UNC
-        caminho_pasta = os.path.dirname(exr_path.replace(r"Y:", r"\\192.168.0.250\renders"))
+        # Normaliza e trata drives diferentes:
+        # - M: -> \\192.168.0.250\renders2
+        # - Y: -> \\192.168.0.250\renders (comportamento anterior)
+        # Caso não seja um drive conhecido, usa o caminho original.
+        if re.match(r'^[Mm]:', exr_path):
+            caminho_pasta = os.path.dirname(exr_path.replace(exr_path[:2], r"\\192.168.0.250\renders2"))
+        elif re.match(r'^[Yy]:', exr_path):
+            caminho_pasta = os.path.dirname(exr_path.replace(exr_path[:2], r"\\192.168.0.250\renders"))
+        else:
+            caminho_pasta = os.path.dirname(exr_path)
     else:
         caminho_pasta = None
 

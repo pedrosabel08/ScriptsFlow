@@ -218,6 +218,8 @@ def process_job_folder(cursor, job_folder):
             caminho_pasta = os.path.dirname(exr_path.replace(exr_path[:2], r"\\192.168.0.250\renders2"))
         elif re.match(r'^[Yy]:', exr_path):
             caminho_pasta = os.path.dirname(exr_path.replace(exr_path[:2], r"\\192.168.0.250\renders"))
+        elif re.match(r'^[Nn]:', exr_path):
+            caminho_pasta = os.path.dirname(exr_path.replace(exr_path[:2], r"\\192.168.0.250\exchange"))
         else:
             caminho_pasta = os.path.dirname(exr_path)
     else:
@@ -304,17 +306,26 @@ def process_job_folder(cursor, job_folder):
     # 4️⃣ Fluxo normal para Em andamento ou novo registro
     previa_val = None
     if caminho_pasta and os.path.exists(caminho_pasta):
+        # Collect all JPGs (angles). We'll upload each and store in render_previews.
         jpgs = [f for f in os.listdir(caminho_pasta) if f.lower().endswith(".jpg")]
         if jpgs:
-            previa_val = jpgs[0]
+            # Sort to have deterministic order (e.g., LD1_RES_001, LD1_RES_002 ...)
+            jpgs.sort()
+            previa_val = jpgs[0]  # legacy: store the first one in render_alta.prevista_jpg
 
-            # Upload da prévia
-            local_path = os.path.join(caminho_pasta, previa_val)
-            remote_path = remote_base_path + previa_val  # sempre dentro de /www/sistema/uploads/renders/
             ftp_host = os.getenv("FTP_HOST")
             ftp_user = os.getenv("FTP_USER")
             ftp_pass = os.getenv("FTP_PASS")
-            upload_ok = upload_to_ftp(local_path, remote_path, ftp_host, ftp_user, ftp_pass)
+
+            uploaded_previews = []
+            for jpg in jpgs:
+                local_path = os.path.join(caminho_pasta, jpg)
+                remote_path = remote_base_path + jpg
+                upload_ok = upload_to_ftp(local_path, remote_path, ftp_host, ftp_user, ftp_pass)
+                if upload_ok:
+                    uploaded_previews.append(jpg)
+
+            # After uploading all previews, we'll insert them into render_previews once render_id is known.
 
 
     cursor.execute("""
@@ -499,6 +510,28 @@ def process_job_folder(cursor, job_folder):
             WHERE idimagens_cliente_obra = %s
         """, (imagem_id,))
         log_and_print(f"Imagem atualizada para status = REN na imagem_id {imagem_id}")
+
+    # -------------------------------
+    # Salvar previews múltiplos (angles) na tabela render_previews
+    # -------------------------------
+    try:
+        # Apenas registre previews múltiplos se o status da imagem for P00 (status_id == 1)
+        if 'uploaded_previews' in locals() and uploaded_previews and render_id and status_id == 1:
+            # Use INSERT ... ON DUPLICATE KEY UPDATE noop para evitar duplicatas.
+            for filename in uploaded_previews:
+                try:
+                    cursor.execute(
+                        "INSERT INTO render_previews (render_id, filename) VALUES (%s, %s) ON DUPLICATE KEY UPDATE filename=filename",
+                        (render_id, filename)
+                    )
+                    log_and_print(f"➕ Preview registrado: {filename} -> render_id {render_id}")
+                except Exception as e:
+                    log_and_print(f"⚠ Falha ao inserir preview {filename}: {e}", "warning")
+        else:
+            if 'uploaded_previews' in locals() and uploaded_previews:
+                log_and_print(f"ℹ Previews encontrados, mas não registrados (status_id={status_id})")
+    except Exception as e:
+        log_and_print(f"⚠ Erro ao processar previews: {e}", "warning")
 
 def main():
     log_and_print(f"Iniciando processamento da pasta: {PARENT_FOLDER}")

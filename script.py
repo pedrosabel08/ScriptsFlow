@@ -380,7 +380,8 @@ def process_job_folder(cursor, job_folder):
     responsavel_pos_id = pos_row[0] if pos_row else None
 
     # 🔹 Inserir ou atualizar na tabela pós-produção
-    if responsavel_pos_id:  # só se houver alguém com função 5
+    # Não criar registro de pós-produção quando status_id == 1
+    if responsavel_pos_id and status_id != 1:
         cursor.execute("""
             INSERT INTO pos_producao
             (render_id, imagem_id, obra_id, colaborador_id, caminho_pasta, numero_bg, status_id, responsavel_id)
@@ -404,7 +405,10 @@ def process_job_folder(cursor, job_folder):
         ))
         log_and_print(f"📌 Pós-produção vinculada: render_id={render_id}, imagem_id={imagem_id}, obra_id={obra_id}")
     else:
-        log_and_print(f"⚠ Imagem {imagem_id} não possui pós-produção, pulando inserção na pos_producao")
+        if responsavel_pos_id and status_id == 1:
+            log_and_print(f"⚠ Pos-produção não criada pois status_id == 1 para imagem_id {imagem_id}")
+        else:
+            log_and_print(f"⚠ Imagem {imagem_id} não possui pós-produção, pulando inserção na pos_producao")
     
     # AGORA LENDO TUDO DO .ENV
     slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")

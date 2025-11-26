@@ -67,16 +67,61 @@ def upload_to_ftp(local_path, remote_path, ftp_host, ftp_user, ftp_pass):
     try:
         ftp = FTP(ftp_host, timeout=30)
         ftp.login(ftp_user, ftp_pass)
+        # usar modo passivo (compatível com NAT/Firewalls)
+        ftp.set_pasv(True)
+        # opcional: debug level controlável por variável de ambiente
+        if os.getenv("FTP_DEBUG") == "1":
+            ftp.set_debuglevel(2)
+
         log_and_print(f"🌐 Conectado ao FTP: {ftp_host}")
 
+        # Normalizar separadores e extrair diretório remoto + nome do arquivo
+        remote_path = remote_path.replace('\\', '/')
+        remote_dir = os.path.dirname(remote_path)
+        remote_name = os.path.basename(remote_path)
+
+        # Tentar mudar para diretório remoto; se não existir, criar recursivamente
+        if remote_dir:
+            # alguns servidores preferem que mudemos por partes (cwd(part))
+            parts = [p for p in remote_dir.split('/') if p]
+            try:
+                log_and_print(f"🔍 FTP pwd antes da criação: {ftp.pwd()}")
+                # listar conteúdo atual (diagnóstico).
+                try:
+                    listing = ftp.nlst()
+                    log_and_print(f"🔍 Listagem inicial remota: {listing[:10]}")
+                except Exception:
+                    log_and_print("🔍 Falha ao listar diretório remoto (não crítico)")
+            except Exception:
+                # ftp.pwd() pode falhar em alguns servidores; não bloqueia
+                pass
+
+            for part in parts:
+                try:
+                    ftp.cwd(part)
+                except Exception:
+                    try:
+                        ftp.mkd(part)
+                        log_and_print(f"📁 Diretório criado no FTP: {part}")
+                        ftp.cwd(part)
+                    except Exception as e:
+                        log_and_print(f"❌ Falha ao garantir diretório remoto '{part}': {e}", "error")
+                        ftp.quit()
+                        return False
+
+        # Enviar arquivo usando somente o nome (já estamos no diretório certo)
         with open(local_path, "rb") as file:
-            ftp.storbinary(f"STOR {remote_path}", file)
+            ftp.storbinary(f"STOR {remote_name}", file)
 
         ftp.quit()
         log_and_print(f"✅ Upload concluído: {remote_path}")
         return True
     except Exception as e:
         log_and_print(f"❌ Erro no upload FTP: {e}", "error")
+        try:
+            ftp.quit()
+        except Exception:
+            pass
         return False
 
 
@@ -103,6 +148,51 @@ def parse_xml(xml_path):
     }
     log_and_print(f"Dados XML: {data}")
     return data
+
+
+def normalize_datetime_for_mysql(s: str):
+    """Normaliza várias formatações comuns vindas do XML para 'YYYY-MM-DD HH:MM:SS[.ffffff]'.
+    Retorna None se não for possível normalizar.
+    """
+    if not s:
+        return None
+    s = str(s).strip()
+    # substituir barra por hífen para normalizar data
+    s = s.replace('/', '-')
+
+    # Captura data inicial (YYYY-MM-DD) e resto
+    m = re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})[T\s\-]*(.*)$', s)
+    if not m:
+        return None
+    year, mon, day, rest = m.group(1), m.group(2), m.group(3), m.group(4)
+
+    # Remover timezone offset no fim, ex: -03, +0100, -03:00
+    tz_match = re.search(r'([+-]\d{1,2}(?::?\d{2})?)\s*$', rest)
+    if tz_match:
+        rest = rest[:tz_match.start()].rstrip(' -:')
+
+    # Separe componentes de tempo; alguns formatos usam ':' antes da fração
+    parts = re.split(r'[:\.]', rest) if rest else []
+    if len(parts) >= 3:
+        hour = parts[0].zfill(2)
+        minute = parts[1].zfill(2)
+        second = parts[2].zfill(2)
+        frac = ''.join(parts[3:]) if len(parts) > 3 else ''
+        if frac:
+            # manter apenas dígitos e ajustar para micros (6 dígitos)
+            frac = re.sub(r'\D', '', frac)
+            frac = (frac + '000000')[:6]
+            time_part = f"{hour}:{minute}:{second}.{frac}"
+        else:
+            time_part = f"{hour}:{minute}:{second}"
+    else:
+        # se não conseguimos extrair hora, retornar apenas data (MySQL aceita 'YYYY-MM-DD')
+        time_part = ''
+
+    date_part = f"{int(year):04d}-{int(mon):02d}-{int(day):02d}"
+    if time_part:
+        return f"{date_part} {time_part}"
+    return date_part
 
 def check_log(log_path):
     log_and_print(f"Lendo log: {log_path}")
@@ -261,7 +351,7 @@ def process_job_folder(cursor, job_folder):
         status_custom = complete or "Desconhecido"
 
     # Caminho remoto fixo para todas as imagens
-    remote_base_path = "/www/sistema/uploads/renders/"
+    remote_base_path = "/web/improov.com.br/public_html/flow/ImproovWeb/uploads/renders/"
 
     # 1️⃣ Se status atual = Em aprovação e não tiver previa_jpg → atualizar só a coluna
     if ultimo_status == "Em aprovação":
@@ -328,6 +418,16 @@ def process_job_folder(cursor, job_folder):
             # After uploading all previews, we'll insert them into render_previews once render_id is known.
 
 
+    # Normalizar datas vindas do XML para um formato aceito pelo MySQL
+    submitted_raw = xml_data.get("Submitted")
+    last_updated_raw = xml_data.get("LastUpdated")
+    submitted_dt = normalize_datetime_for_mysql(submitted_raw)
+    last_updated_dt = normalize_datetime_for_mysql(last_updated_raw)
+    if submitted_raw and not submitted_dt:
+        log_and_print(f"⚠ Não foi possível normalizar Submitted='{submitted_raw}' — será gravado NULL", "warning")
+    if last_updated_raw and not last_updated_dt:
+        log_and_print(f"⚠ Não foi possível normalizar LastUpdated='{last_updated_raw}' — será gravado NULL", "warning")
+
     cursor.execute("""
         INSERT INTO render_alta
         (imagem_id, responsavel_id, status_id, status, data, computer, submitted, last_updated, has_error, errors, job_folder, previa_jpg, numero_bg)
@@ -342,8 +442,8 @@ def process_job_folder(cursor, job_folder):
         status_custom,
         datetime.now(),
         xml_data.get("Computer"),
-        xml_data.get("Submitted"),
-        xml_data.get("LastUpdated"),
+        submitted_dt,
+        last_updated_dt,
         has_error,
         errors,
         caminho_pasta,

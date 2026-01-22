@@ -17,7 +17,7 @@ PARENT_FOLDER = r"C:\Backburner_Job"
 EXCLUDE_KEYWORD = "ANIMA"
 
 # Arquivo de log
-LOG_FILE = os.path.join(PARENT_FOLDER, "processamento.log")
+LOG_FILE = os.path.join(PARENT_FOLDER, "processamento2.log")
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.INFO,
@@ -34,6 +34,61 @@ def log_and_print(msg, level="info"):
         logging.error(msg)
     elif level == "warning":
         logging.warning(msg)
+
+
+def send_webhook_message(message):
+    slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+    payload = {"text": message}
+    try:
+        response = requests.post(slack_webhook_url, json=payload)
+        if response.status_code == 200:
+            log_and_print("✅ Mensagem enviada para o canal de renders!")
+        else:
+            log_and_print(f"❌ Erro ao enviar para o canal de renders: {response.text}")
+    except Exception as e:
+        log_and_print(f"❌ Exceção ao enviar webhook: {e}")
+
+
+def get_user_id_by_name(user_name):
+    flow_token = os.getenv("FLOW_TOKEN")
+    url = "https://slack.com/api/users.list"
+    headers = {"Authorization": f"Bearer {flow_token}"}
+    try:
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        if not data.get("ok"):
+            log_and_print(f"❌ Erro na API users.list: {data.get('error')}")
+            return None
+        for member in data.get("members", []):
+            if "real_name" in member and member["real_name"].lower() == user_name.lower():
+                return member["id"]
+        log_and_print(f"❌ Usuário {user_name} não encontrado no Slack.")
+        return None
+    except Exception as e:
+        log_and_print(f"❌ Exceção ao buscar usuário {user_name}: {e}")
+        return None
+
+
+def send_dm_to_user(user_id, message):
+    flow_token = os.getenv("FLOW_TOKEN")
+    url = "https://slack.com/api/chat.postMessage"
+    headers = {
+        "Authorization": f"Bearer {flow_token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "channel": user_id,
+        "text": message
+    }
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        data = response.json()
+        if response.status_code == 200 and data.get("ok"):
+            log_and_print(f"✅ DM enviada para {user_id} com sucesso!")
+        else:
+            log_and_print(f"❌ Erro ao enviar DM para {user_id}: {data.get('error', response.text)}")
+    except Exception as e:
+        log_and_print(f"❌ Exceção ao enviar DM para {user_id}: {e}")
 
 # Conexão com banco - AGORA LENDO TUDO DO .ENV
 conn = pymysql.connect(
@@ -262,7 +317,7 @@ def find_status_id(cursor, imagem_id):
     return None
 
 
-def process_job_folder(cursor, job_folder):
+def process_job_folder(cursor, job_folder, p00_rollup=None):
     folder_name = os.path.basename(job_folder)
     if EXCLUDE_KEYWORD in folder_name.upper():
         log_and_print(f"Ignorado (ANIMA): {job_folder}")
@@ -350,6 +405,35 @@ def process_job_folder(cursor, job_folder):
     else:
         status_custom = complete or "Desconhecido"
 
+    # Acumular status do P00 por imagem (para notificação única)
+    if status_id == 1 and p00_rollup is not None:
+        roll = p00_rollup.get(imagem_id)
+        if not roll:
+            roll = {
+                "image_name_db": image_name_db,
+                "resp_id": resp_id,
+                "funcao_id": funcao_id,
+                "total_jobs": 0,
+                "completed_jobs": 0,
+                "any_error": False,
+                "any_incomplete": False,
+                "all_complete": True
+            }
+            p00_rollup[imagem_id] = roll
+
+        roll["total_jobs"] += 1
+        if resp_id and not roll.get("resp_id"):
+            roll["resp_id"] = resp_id
+
+        complete_val = (xml_data.get("Complete") or "").strip().lower()
+        if has_error:
+            roll["any_error"] = True
+        if complete_val == "yes":
+            roll["completed_jobs"] += 1
+        else:
+            roll["all_complete"] = False
+            roll["any_incomplete"] = True
+
     # Caminho remoto fixo para todas as imagens
     remote_base_path = "/web/improov.com.br/public_html/flow/ImproovWeb/uploads/renders/"
 
@@ -428,6 +512,10 @@ def process_job_folder(cursor, job_folder):
     if last_updated_raw and not last_updated_dt:
         log_and_print(f"⚠ Não foi possível normalizar LastUpdated='{last_updated_raw}' — será gravado NULL", "warning")
 
+    status_to_write = status_custom
+    if status_id == 1 and ultimo_status is not None:
+        status_to_write = ultimo_status
+
     cursor.execute("""
         INSERT INTO render_alta
         (imagem_id, responsavel_id, status_id, status, data, computer, submitted, last_updated, has_error, errors, job_folder, previa_jpg, numero_bg)
@@ -439,7 +527,7 @@ def process_job_folder(cursor, job_folder):
         imagem_id,
         resp_id,
         status_id,
-        status_custom,
+        status_to_write,
         datetime.now(),
         xml_data.get("Computer"),
         submitted_dt,
@@ -510,66 +598,11 @@ def process_job_folder(cursor, job_folder):
         else:
             log_and_print(f"⚠ Imagem {imagem_id} não possui pós-produção, pulando inserção na pos_producao")
     
-    # AGORA LENDO TUDO DO .ENV
-    slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
-    flow_token = os.getenv("FLOW_TOKEN")
-
-    # 1️⃣ Enviar mensagem para o canal de renders via webhook
-    def send_webhook_message(message):
-        payload = {"text": message}
-        try:
-            response = requests.post(slack_webhook_url, json=payload)
-            if response.status_code == 200:
-                log_and_print(f"✅ Mensagem enviada para o canal de renders!")
-            else:
-                log_and_print(f"❌ Erro ao enviar para o canal de renders: {response.text}")
-        except Exception as e:
-            log_and_print(f"❌ Exceção ao enviar webhook: {e}")
-
-    # 2️⃣ Buscar ID real do usuário pelo nome
-    def get_user_id_by_name(user_name):
-        url = "https://slack.com/api/users.list"
-        headers = {"Authorization": f"Bearer {flow_token}"}
-        try:
-            response = requests.get(url, headers=headers)
-            data = response.json()
-            if not data.get("ok"):
-                log_and_print(f"❌ Erro na API users.list: {data.get('error')}")
-                return None
-            for member in data.get("members", []):
-                if "real_name" in member and member["real_name"].lower() == user_name.lower():
-                    return member["id"]
-            log_and_print(f"❌ Usuário {user_name} não encontrado no Slack.")
-            return None
-        except Exception as e:
-            log_and_print(f"❌ Exceção ao buscar usuário {user_name}: {e}")
-            return None
-
-    # 3️⃣ Enviar DM usando API Slack
-    def send_dm_to_user(user_id, message):
-        url = "https://slack.com/api/chat.postMessage"
-        headers = {
-            "Authorization": f"Bearer {flow_token}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "channel": user_id,
-            "text": message
-        }
-        try:
-            response = requests.post(url, json=payload, headers=headers)
-            data = response.json()
-            if response.status_code == 200 and data.get("ok"):
-                log_and_print(f"✅ DM enviada para {user_id} com sucesso!")
-            else:
-                log_and_print(f"❌ Erro ao enviar DM para {user_id}: {data.get('error', response.text)}")
-        except Exception as e:
-            log_and_print(f"❌ Exceção ao enviar DM para {user_id}: {e}")
 
     # -------------------------------
     # Lógica de notificação
     # -------------------------------
-    if resp_id and status_custom != ultimo_status:
+    if status_id != 1 and resp_id and status_custom != ultimo_status:
         if status_custom == "Erro":
             msg = f"O render da imagem: {image_name_db} deu erro, favor verificar!"
         elif status_custom == "Em aprovação":
@@ -640,16 +673,81 @@ def process_job_folder(cursor, job_folder):
 def main():
     log_and_print(f"Iniciando processamento da pasta: {PARENT_FOLDER}")
     with conn.cursor() as cursor:
+        p00_rollup = {}
         # Percorre todas as subpastas dentro da pasta raiz
         for root, dirs, files in os.walk(PARENT_FOLDER):
             for d in dirs:
                 job_folder = os.path.join(root, d)
                 try:
-                    process_job_folder(cursor, job_folder)
+                    process_job_folder(cursor, job_folder, p00_rollup)
                 except Exception as e:
                     log_and_print(f"❌ Erro ao processar a pasta {job_folder}: {e}", "error")
                     # continua para a próxima pasta sem parar tudo
                     continue  
+
+        # Notificação agregada para P00 (status_id = 1)
+        if p00_rollup:
+            for imagem_id, roll in p00_rollup.items():
+                total_jobs = roll.get("total_jobs", 0)
+                completed_jobs = roll.get("completed_jobs", 0)
+                any_error = roll.get("any_error", False)
+                any_incomplete = roll.get("any_incomplete", False)
+                all_complete = roll.get("all_complete", False)
+
+                if any_error:
+                    status_agg = "Erro"
+                elif any_incomplete:
+                    status_agg = "Em andamento"
+                elif all_complete and total_jobs > 0:
+                    status_agg = "Em aprovação"
+                else:
+                    status_agg = "Desconhecido"
+
+                cursor.execute(
+                    "SELECT idrender_alta, status FROM render_alta WHERE imagem_id = %s AND status_id = 1 ORDER BY idrender_alta DESC LIMIT 1",
+                    (imagem_id,)
+                )
+                row = cursor.fetchone()
+                render_id = row[0] if row else None
+                ultimo_status = row[1] if row else None
+
+                # Atualiza status agregado no render_alta (mantém estado único por imagem)
+                if render_id:
+                    cursor.execute(
+                        "UPDATE render_alta SET status = %s WHERE idrender_alta = %s",
+                        (status_agg, render_id)
+                    )
+
+                resp_id = roll.get("resp_id")
+                image_name_db = roll.get("image_name_db")
+
+                # Enviar notificação apenas quando houver mudança real no status agregado
+                if resp_id and status_agg != ultimo_status:
+                    if status_agg == "Erro":
+                        msg = f"O render da imagem: {image_name_db} deu erro, favor verificar!"
+                    elif status_agg == "Em aprovação":
+                        msg = f"O render da imagem: {image_name_db} foi concluído com sucesso, favor aprovar!"
+                    elif status_agg == "Em andamento":
+                        msg = f"O render da imagem: {image_name_db} está em andamento."
+                    else:
+                        msg = None
+
+                    if msg:
+                        send_webhook_message(msg)
+
+                        cursor.execute("SELECT nome_slack FROM usuario WHERE idcolaborador = %s", (resp_id,))
+                        slack_names = cursor.fetchall()
+                        for slack_name_tuple in slack_names:
+                            slack_name = slack_name_tuple[0]
+                            user_id = get_user_id_by_name(slack_name)
+                            if user_id:
+                                send_dm_to_user(user_id, msg)
+
+                        cursor.execute(
+                            "INSERT INTO notificacoes (colaborador_id, mensagem) VALUES (%s, %s)",
+                            (resp_id, msg)
+                        )
+                        log_and_print(f"🔔 Notificação P00 enviada para colaborador {resp_id} e canal de renders.")
         conn.commit()
     log_and_print("Processamento concluído!")
 
